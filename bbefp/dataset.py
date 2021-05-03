@@ -187,6 +187,10 @@ def npz_to_features(d):
     return z, drapidity, dphi
 
 
+def npz_to_epxpypx(d):
+    A = uptools.FourVectorArray(d['pt'], d['eta'], d['phi'], d['energy'])
+    return np.stack((A.energy, A.px, A.py, A.pz)).T
+
 
 def extrema(rawdir):
     ext_z = ExtremaRecorder()
@@ -218,6 +222,7 @@ def merge_npzs(rawdir):
     merged_inpz = []
     merged_jet4vecs = []
     proto_X = []
+    proto_epxpypz = []
     for i_npz, npz in tqdm.tqdm(enumerate(sorted(npzs)), total=len(npzs)):
         d = np.load(npz)
         merged_y.append(d['y'])
@@ -226,6 +231,7 @@ def merge_npzs(rawdir):
         z, drapidity, dphi = npz_to_features(d)
         max_dim = max(z.shape[0], max_dim)
         proto_X.append([z, drapidity, dphi])
+        proto_epxpypz.append(npz_to_epxpypx(d))
 
     # Since X size is only known after full loop, only construct it now
     merged_X = []
@@ -237,12 +243,21 @@ def merge_npzs(rawdir):
         X[:n_this_jet,2] = dphi
         merged_X.append(X)
 
+    # Same for epxpypz: Need to add zeroes at the end
+    merged_epxpypz = []
+    for epxpypz in proto_epxpypz:
+        X = np.zeros((max_dim, 4))
+        n_this_jet = epxpypz.shape[0]
+        X[:n_this_jet] = epxpypz
+        merged_epxpypz.append(X)
+
     # List of jet pt and mass for the EFP finding algo
     merged_jet4vecs = np.array(merged_jet4vecs)
     jets = uptools.FourVectorArray(*(merged_jet4vecs.T))
     merged_X_ptm = np.stack((jets.pt, jets.mass)).T
 
     merged_X = np.array(merged_X)
+    merged_epxpypz = np.array(merged_epxpypz)
     merged_y = np.array(merged_y)
     merged_inpz = np.array(merged_inpz)
 
@@ -253,7 +268,23 @@ def merge_npzs(rawdir):
     merged_y = merged_y[random_order]
     merged_inpz = merged_inpz[random_order]
 
-    np.savez(outfile, X=merged_X, X_ptm=merged_X_ptm, y=merged_y, inpz=merged_inpz)
+    np.savez(
+        outfile,
+        X=merged_X, X_ptm=merged_X_ptm, epxpypz=merged_epxpypz,
+        y=merged_y, inpz=merged_inpz
+        )
+
+
+def get_loader(merged_npz, batch_size):
+    """For torch datasets"""
+    import torch
+    d = np.load(merged_npz)
+    dataset = torch.utils.data.TensorDataset(
+        torch.from_numpy(d['X_ptm']),
+        torch.from_numpy(d['y'])
+        )
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size)
+
 
 
 def main():

@@ -223,6 +223,7 @@ def merge_npzs(rawdir):
     merged_jet4vecs = []
     proto_X = []
     proto_epxpypz = []
+    ptetaphie = []
     for i_npz, npz in tqdm.tqdm(enumerate(sorted(npzs)), total=len(npzs)):
         d = np.load(npz)
         merged_y.append(d['y'])
@@ -231,6 +232,7 @@ def merge_npzs(rawdir):
         z, drapidity, dphi = npz_to_features(d)
         max_dim = max(z.shape[0], max_dim)
         proto_X.append([z, drapidity, dphi])
+        ptetaphie.append(np.stack((d['pt'], d['eta'], d['phi'], d['energy'])).T)
         proto_epxpypz.append(npz_to_epxpypx(d))
 
     # Since X size is only known after full loop, only construct it now
@@ -271,11 +273,11 @@ def merge_npzs(rawdir):
     np.savez(
         outfile,
         X=merged_X, X_ptm=merged_X_ptm, epxpypz=merged_epxpypz,
-        y=merged_y, inpz=merged_inpz
+        y=merged_y, inpz=merged_inpz, ptetaphie=ptetaphie, jet4vec=merged_jet4vecs
         )
 
 
-def get_loader(merged_npz, batch_size):
+def get_loader_ptm(merged_npz, batch_size):
     """For torch datasets"""
     import torch
     d = np.load(merged_npz)
@@ -285,6 +287,134 @@ def get_loader(merged_npz, batch_size):
         )
     return torch.utils.data.DataLoader(dataset, batch_size=batch_size)
 
+def get_loader_ptm_plus_efps(merged_npz, efp_file, efps, batch_size):
+    import torch
+    d = np.load(merged_npz)
+    ptm = d['X_ptm']
+    efp_values = np.load(efp_file)['efp'][:,efps]
+    efp_values /= np.max(efp_values)
+    X = np.hstack((ptm, efp_values)).astype(np.float32)
+    dataset = torch.utils.data.TensorDataset(
+        torch.from_numpy(X),
+        torch.from_numpy(d['y'])
+        )
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size)
+
+
+import torch
+from torch_geometric.data import (Data, Dataset, DataLoader)
+
+class ZNNDataset(Dataset):
+    """PyTorch geometric dataset from processed hit information"""
+
+    def __init__(self, merged_npz, *args, **kwargs):
+        d = np.load(merged_npz, allow_pickle=True)
+        self.ptetaphie = d['ptetaphie']
+        self.jet4vecs = d['jet4vec']
+        self.y = d['y']
+        super(ZNNDataset, self).__init__(merged_npz, *args, **kwargs)
+        # self.__indices__ = range(len(self.ptetaphie))
+        # self.transform = None
+
+    def norm(self, X, jet):
+        pt, eta, phi, e = X.T
+        deta_norm = (eta - jet[1])/2.
+
+        dphi = phi - jet[2]
+        dphi %= 2.*pi # Map to 0..2pi range
+        dphi[dphi > pi] = dphi[dphi > pi] - 2.*pi # Map >pi to -pi..0 range
+        dphi_norm = dphi/2. # Normalize to approximately -1..1 range
+
+        pt_norm = pt / 30.
+        energy_norm = e / 100.
+        return np.stack((pt_norm, deta_norm, dphi_norm, energy_norm)).T
+
+
+    def __len__(self):
+        return len(self.ptetaphie)
+
+    @property
+    def raw_file_names(self):
+        return [self.merged_npz]    
+    
+    def get(self, i):
+        return Data(
+            x = torch.from_numpy(self.norm(self.ptetaphie[i], self.jet4vecs[i])),
+            y = torch.from_numpy(self.y[i:i+1])
+            )
+
+def get_loader_ptetaphie(merged_npz, batch_size):
+    dataset = ZNNDataset(merged_npz)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+
+
+
+def calc_dphi(a, b):
+    dphi = a - b
+    dphi %= 2.*pi # Map to 0..2pi range
+    try:
+        dphi[dphi > pi] = dphi[dphi > pi] - 2.*pi # Map >pi to -pi..0 range
+    except TypeError:
+        if dphi > pi: dphi -= 2.*pi # In case a and b were both simple floats
+    return dphi
+
+
+def pad_zeros(a, N):
+    """
+    Adds zeros or cuts away parts of a
+
+    a: dim-1 array to be padded
+    N: Dim to be padded to, or to be cut to
+    """
+    return a[:N] if a.shape[0] > N else np.concatenate((a, np.zeros(N-a.shape[0])))
+
+def get_data_particlenet(merged_npz, N=200):
+    d = np.load(merged_npz, allow_pickle=True)
+    ptetaphie = d['ptetaphie']
+    jet4vecs = d['jet4vec']
+
+    n_events = len(jet4vecs)
+
+    # Get the target dimension if not given
+    if N is None: N = max(e.shape[0] for e in ptetaphie)
+   
+    all_coords = np.zeros((n_events, N, 2))
+    all_features = np.zeros((n_events, N, 5))
+    all_masks = np.zeros((n_events, N, 1))
+
+    for i in range(n_events):
+        pt, eta, phi, e = ptetaphie[i].T
+        jet_pt, jet_eta, jet_phi, jet_e = jet4vecs[i]
+
+        # coords
+        deta = eta - jet_eta
+        dphi = calc_dphi(phi, jet_phi)
+
+        # features
+        logpt = np.log(pt)
+        loge = np.log(e)
+        logpt_ptjet = np.log(pt/jet_pt)
+        loge_ejet = np.log(e/jet_e)
+        dr = np.sqrt(deta**2 + dphi**2)
+
+        all_features[i] = np.stack((
+            pad_zeros(logpt, N),
+            pad_zeros(loge, N),
+            pad_zeros(logpt_ptjet, N),
+            pad_zeros(loge_ejet, N),
+            pad_zeros(dr, N),
+            )).T
+
+        all_coords[i] = np.stack((
+            pad_zeros(deta, N),
+            pad_zeros(dphi, N)
+            )).T
+
+        all_masks[i,:len(pt),:] = 1
+
+    y = np.stack((1-d['y'], d['y'])).T # One-hot encoded
+    return dict(points=all_coords, features=all_features, mask=all_masks), y
 
 
 def main():

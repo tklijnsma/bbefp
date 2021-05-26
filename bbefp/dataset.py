@@ -131,12 +131,13 @@ def iter_events_qcd(N):
         for i in range(uptools.numentries(arrays)):
             yield uptools.get_event(arrays, i)
 
-def make_npzs_bkg(N=8000):
+def make_npzs_bkg(N=12000):
     train_outdir = 'data/train/raw/qcd'
     test_outdir = 'data/test/raw/qcd'
     for i_event, event in tqdm.tqdm(enumerate(iter_events_qcd(N)), total=N):
         outdir = test_outdir if i_event % 5 == 0 else train_outdir
         ntup_to_npz_bkg(event, outdir + f'/{i_event}.npz')
+    print(f'Bkg npzs done - {N} events')
 
 
 def make_npzs_signal():

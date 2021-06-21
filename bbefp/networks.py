@@ -336,9 +336,15 @@ class DynamicReductionNetwork(nn.Module):
         # print(data.x)
         # raise Exception
 
+        print('data.x:', data.x.size())
         data.x = self.inputnet(data.x)
+        print('data.x:', data.x.size())
         data.edge_index = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv1.flow))
+        print('data.edge_index:', data.edge_index.size())
         data.x = self.edgeconv1(data.x, data.edge_index)
+        print('data.x:', data.x.size())
+
+        raise Exception('stop')
 
         weight = normalized_cut_2d(data.edge_index, data.x)
         cluster = graclus(data.edge_index, weight, data.x.size(0))
@@ -359,3 +365,84 @@ class DynamicReductionNetwork(nn.Module):
 
         # print(logits)
         # return F.log_softmax(logits, dim=1)
+
+
+class ParticleNet(nn.Module):
+    """
+    Attempt at pytorch implementation of the ParticleNet architecture
+    https://arxiv.org/pdf/1902.08570.pdf
+    """
+    def __init__(self,
+        input_coord_dim=2, input_features_dim=5, output_dim=2,
+        aggr='mean',
+        ):
+        super(ParticleNet, self).__init__()
+        self.input_features_dim = input_features_dim
+        self.input_coord_dim = input_coord_dim
+        self.output_dim = output_dim
+        self.k = 4
+        self.aggr = aggr
+
+        # convnn1 = nn.Sequential(
+        #     nn.Linear(self.input_features_dim, 32),
+        #     nn.ELU(),
+        #     nn.Linear(32, 64),
+        #     nn.ELU(),
+        #     )
+        convnn1 = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ELU(),
+            nn.Linear(32, 5),
+            nn.ELU(),
+            )
+        self.edgeconv1 = EdgeConv(nn=convnn1, aggr=aggr)
+
+        convnn2 = nn.Sequential(
+            nn.Linear(64, (64+128)//2),
+            nn.ELU(),
+            nn.Linear((64+128)//2, 128),
+            nn.ELU(),
+            )
+        self.edgeconv2 = EdgeConv(nn=convnn2, aggr=aggr)
+
+        convnn3 = nn.Sequential(
+            nn.Linear(128, (128+256)//2),
+            nn.ELU(),
+            nn.Linear((128+256)//2, 256),
+            nn.ELU(),
+            )
+        self.edgeconv3 = EdgeConv(nn=convnn3, aggr=aggr)
+
+        self.ec_output_dim = 5 + 64 + 128 + 256 # Include all the shortcuts
+        self.output = nn.Sequential(
+            nn.Linear(self.ec_output_dim, self.ec_output_dim),
+            nn.ELU(),
+            nn.Linear(self.ec_output_dim, self.ec_output_dim//2),
+            nn.ELU(),
+            nn.Linear(self.ec_output_dim//2, self.output_dim)
+            )
+
+
+    def forward(self, data):
+        # Use the coords for the first knn step
+        print('data.x:', data.x.size())
+        print('data.batch:', data.batch.size())
+        clustering1 = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv1.flow))
+        print('clustering1:', clustering1.size())
+        out1 = self.edgeconv1(data.features, clustering1)
+        print('out1:', out1.size())
+
+        raise Exception('stop')
+
+        # Now use the outputted features of the previous layer for the knn
+        clustering2 = to_undirected(knn_graph(out1, self.k, data.batch, loop=False, flow=self.edgeconv2.flow))
+        out2 = self.edgeconv2(out1, clustering2)
+
+        clustering3 = to_undirected(knn_graph(out2, self.k, data.batch, loop=False, flow=self.edgeconv3.flow))
+        out3 = self.edgeconv3(out2, clustering3)
+
+        # Cat all outputs together
+        edgeconv_out = torch.cat([data.features, out1, out2, out3])
+
+        # Run the output layer
+        return self.output(edgeconv_out).squeeze(-1)

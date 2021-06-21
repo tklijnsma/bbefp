@@ -348,8 +348,6 @@ def get_loader_ptetaphie(merged_npz, batch_size):
     return DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
 
-
-
 def calc_dphi(a, b):
     dphi = a - b
     dphi %= 2.*pi # Map to 0..2pi range
@@ -369,7 +367,7 @@ def pad_zeros(a, N):
     """
     return a[:N] if a.shape[0] > N else np.concatenate((a, np.zeros(N-a.shape[0])))
 
-def get_data_particlenet(merged_npz, N=200):
+def get_data_particlenet(merged_npz, N=200, padding=True):
     d = np.load(merged_npz, allow_pickle=True)
     ptetaphie = d['ptetaphie']
     jet4vecs = d['jet4vec']
@@ -378,10 +376,15 @@ def get_data_particlenet(merged_npz, N=200):
 
     # Get the target dimension if not given
     if N is None: N = max(e.shape[0] for e in ptetaphie)
-   
-    all_coords = np.zeros((n_events, N, 2))
-    all_features = np.zeros((n_events, N, 5))
-    all_masks = np.zeros((n_events, N, 1))
+
+    if padding:
+        all_coords = np.zeros((n_events, N, 2))
+        all_features = np.zeros((n_events, N, 5))
+        all_masks = np.zeros((n_events, N, 1))
+    else:
+        all_coords = [ None for i in range(n_events) ]
+        all_features = [ None for i in range(n_events) ]
+        all_masks = [ None for i in range(n_events) ]
 
     for i in range(n_events):
         pt, eta, phi, e = ptetaphie[i].T
@@ -398,23 +401,50 @@ def get_data_particlenet(merged_npz, N=200):
         loge_ejet = np.log(e/jet_e)
         dr = np.sqrt(deta**2 + dphi**2)
 
-        all_features[i] = np.stack((
-            pad_zeros(logpt, N),
-            pad_zeros(loge, N),
-            pad_zeros(logpt_ptjet, N),
-            pad_zeros(loge_ejet, N),
-            pad_zeros(dr, N),
-            )).T
+        if padding:
+            logpt = pad_zeros(logpt, N)
+            loge = pad_zeros(loge, N)
+            logpt_ptjet = pad_zeros(logpt_ptjet, N)
+            loge_ejet = pad_zeros(loge_ejet, N)
+            dr = pad_zeros(dr, N)
+            deta = pad_zeros(deta, N)
+            dphi = pad_zeros(dphi, N)
 
-        all_coords[i] = np.stack((
-            pad_zeros(deta, N),
-            pad_zeros(dphi, N)
-            )).T
+        all_features[i] = np.stack((logpt, loge, logpt_ptjet, loge_ejet, dr)).T
+        all_coords[i] = np.stack((pad_zeros(deta, N), pad_zeros(dphi, N))).T
+        if padding: all_masks[i,:len(pt),:] = 1
 
-        all_masks[i,:len(pt),:] = 1
+    # if padding:
+    #     y = np.stack((1-d['y'], d['y'])).T # One-hot encoded
+    # else:
+    #     y = d['y']
+    return dict(points=all_coords, features=all_features, mask=all_masks), d['y']
 
-    y = np.stack((1-d['y'], d['y'])).T # One-hot encoded
-    return dict(points=all_coords, features=all_features, mask=all_masks), y
+
+class ParticleNetDataset(Dataset):
+    """PyTorch geometric dataset from processed hit information"""
+
+    def __init__(self, merged_npz, *args, padding=False, **kwargs):
+        super(ParticleNetDataset, self).__init__(merged_npz, *args, **kwargs)
+        d, self.y = get_data_particlenet(merged_npz, padding=padding)
+        self.coords = d['points']
+        self.features = d['features']
+        self.masks = d['mask']
+
+    def __len__(self):
+        return len(self.y)
+
+    @property
+    def raw_file_names(self):
+        return [self.merged_npz]    
+    
+    def get(self, i):
+        return Data(
+            x = torch.from_numpy(self.coords[i].astype(np.float32)),
+            features = torch.from_numpy(self.features[i].astype(np.float32)),
+            mask = torch.from_numpy(self.masks[i].astype(np.float32)),
+            y = torch.from_numpy(self.y[i:i+1].astype(np.float32))
+            )
 
 
 def main():

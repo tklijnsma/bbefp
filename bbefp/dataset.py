@@ -361,9 +361,9 @@ class ZNNDataset(Dataset):
             y = torch.from_numpy(self.y[i:i+1])
             )
 
-def get_loader_ptetaphie(merged_npz, batch_size):
+def get_loader_ptetaphie(merged_npz, batch_size, shuffle=True):
     dataset = ZNNDataset(merged_npz)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 def calc_dphi(a, b):

@@ -336,15 +336,9 @@ class DynamicReductionNetwork(nn.Module):
         # print(data.x)
         # raise Exception
 
-        print('data.x:', data.x.size())
         data.x = self.inputnet(data.x)
-        print('data.x:', data.x.size())
         data.edge_index = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv1.flow))
-        print('data.edge_index:', data.edge_index.size())
         data.x = self.edgeconv1(data.x, data.edge_index)
-        print('data.x:', data.x.size())
-
-        raise Exception('stop')
 
         weight = normalized_cut_2d(data.edge_index, data.x)
         cluster = graclus(data.edge_index, weight, data.x.size(0))

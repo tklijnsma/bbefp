@@ -7,6 +7,7 @@ from math import pi
 
 np.random.seed(1001)
 
+import bbefp
 
 class ExtremaRecorder():
     '''
@@ -29,11 +30,15 @@ class ExtremaRecorder():
         self.n = n_new
         if self.do_std: self.values = np.concatenate((self.values, values))
 
+    @property
     def std(self):
         if self.do_std:
             return np.std(self.values)
         else:
             return 0.
+
+    def quantile(self, quantile):
+        return np.quantile(self.values, quantile)
 
     def __repr__(self):
         return (
@@ -50,6 +55,18 @@ class ExtremaRecorder():
         ax = figure.gca()
         ax.hist(self.values, bins=25)
         plt.savefig(outfile, bbox_inches='tight')
+
+    def normalize(self, values):
+        """
+        Returns normalized values
+        """
+        q10 = self.quantile(self.values, .05)
+        q90 = self.quantile(self.values, .95)
+        left = q10 if abs(self.min/q10) < .7 else self.min
+        right = q90 if abs(q90/self.max) < .7 else self.max
+        width = right-left
+        select_nonzero = values != 0.
+        values[select_nonzero] = left + values[select_nonzero] / width
 
 
 def ntup_to_npz_signal(event, outfile):
@@ -368,12 +385,46 @@ def pad_zeros(a, N):
     """
     return a[:N] if a.shape[0] > N else np.concatenate((a, np.zeros(N-a.shape[0])))
 
-def get_data_particlenet(merged_npz, N=200, padding=True):
+
+def iter_data_particlenet(merged_npz, nmax=None):
+    d = np.load(merged_npz, allow_pickle=True)
+    ptetaphie = d['ptetaphie']
+    jet4vecs = d['jet4vec']
+    y = d['y']
+    n_events = len(jet4vecs) if nmax is None else min(nmax, len(jet4vecs))
+    for i in range(n_events):
+        pt, eta, phi, e = ptetaphie[i].T
+        jet_pt, jet_eta, jet_phi, jet_e = jet4vecs[i]
+        # coords
+        deta = eta - jet_eta
+        dphi = calc_dphi(phi, jet_phi)
+        # features
+        logpt = np.log(pt)
+        loge = np.log(e)
+        logpt_ptjet = np.log(pt/jet_pt)
+        loge_ejet = np.log(e/jet_e)
+        dr = np.sqrt(deta**2 + dphi**2)
+        yield [deta, dphi, logpt, loge, logpt_ptjet, loge_ejet, dr], y[i]
+
+def data_pnet_as_akarray(merged_npz, nmax=None):
+    bbefp.logger.info('Building awkward array, nmax=%s', nmax)
+    import awkward0 as ak
+    data = ak.fromiter(iter_data_particlenet(merged_npz, nmax))
+    features = data[:,0]
+    y = data[:,1]
+    return features, y
+
+def normalize_akarray(a):
+
+    maxs = np.max(a, dim=0)
+
+
+def get_data_particlenet(merged_npz, N=200, padding=True, normalize=True, nmax=None):
     d = np.load(merged_npz, allow_pickle=True)
     ptetaphie = d['ptetaphie']
     jet4vecs = d['jet4vec']
 
-    n_events = len(jet4vecs)
+    n_events = len(jet4vecs) if nmax is None else nmax
 
     # Get the target dimension if not given
     if N is None: N = max(e.shape[0] for e in ptetaphie)
@@ -387,7 +438,17 @@ def get_data_particlenet(merged_npz, N=200, padding=True):
         all_features = [ None for i in range(n_events) ]
         all_masks = [ None for i in range(n_events) ]
 
-    for i in range(n_events):
+    if normalize:
+        ext_deta = ExtremaRecorder()
+        ext_dphi = ExtremaRecorder()
+        ext_logpt = ExtremaRecorder()
+        ext_loge = ExtremaRecorder()
+        ext_logpt_ptjet = ExtremaRecorder()
+        ext_loge_ejet = ExtremaRecorder()
+        ext_dr = ExtremaRecorder()
+
+    print('Preparing data')
+    for i in tqdm.tqdm(range(n_events), total=n_events, desc='events'):
         pt, eta, phi, e = ptetaphie[i].T
         jet_pt, jet_eta, jet_phi, jet_e = jet4vecs[i]
 
@@ -402,6 +463,15 @@ def get_data_particlenet(merged_npz, N=200, padding=True):
         loge_ejet = np.log(e/jet_e)
         dr = np.sqrt(deta**2 + dphi**2)
 
+        if normalize:
+            ext_deta.update(deta)
+            ext_dphi.update(dphi)
+            ext_logpt.update(logpt)
+            ext_loge.update(loge)
+            ext_logpt_ptjet.update(logpt_ptjet)
+            ext_loge_ejet.update(loge_ejet)
+            ext_dr.update(dr)
+
         if padding:
             logpt = pad_zeros(logpt, N)
             loge = pad_zeros(loge, N)
@@ -415,6 +485,22 @@ def get_data_particlenet(merged_npz, N=200, padding=True):
         all_coords[i] = np.stack((pad_zeros(deta, N), pad_zeros(dphi, N))).T
         if padding: all_masks[i,:len(pt),:] = 1
 
+    if normalize:
+        print('deta:       ', ext_deta)
+        print('dphi:       ', ext_dphi)
+        print('logpt:      ', ext_logpt)
+        print('loge:       ', ext_loge)
+        print('logpt_ptjet:', ext_logpt_ptjet)
+        print('loge_ejet:  ', ext_loge_ejet)
+        print('dr:         ', ext_dr)
+
+        print('Normalizing...')
+        for i in range(n_events):
+            all_features[i]
+            all_coords[i]
+
+
+
     # if padding:
     #     y = np.stack((1-d['y'], d['y'])).T # One-hot encoded
     # else:
@@ -426,11 +512,11 @@ class ParticleNetDataset(Dataset):
     """PyTorch geometric dataset from processed hit information"""
 
     def __init__(self, merged_npz, *args, padding=False, **kwargs):
-        super(ParticleNetDataset, self).__init__(merged_npz, *args, **kwargs)
-        d, self.y = get_data_particlenet(merged_npz, padding=padding)
-        self.coords = d['points']
-        self.features = d['features']
-        self.masks = d['mask']
+        super(ParticleNetDataset, self).__init__('pndata/train', *args, **kwargs)
+        print(self.root)
+        d = np.load(merged_npz, allow_pickle=True)
+        self.n_events = len(d['y'])
+        del d
 
     def __len__(self):
         return len(self.y)
@@ -438,14 +524,34 @@ class ParticleNetDataset(Dataset):
     @property
     def raw_file_names(self):
         return [self.merged_npz]    
-    
+
+    @property
+    def processed_file_names(self):
+        if not hasattr(self,'processed_files'):
+            self.processed_files = [ f'data_{i}.pt' for i in range(self.n_events) ]
+            self.unshuffled_processed_files = self.processed_files[:]
+            random.shuffle(self.processed_files)
+        return self.processed_files
+
+    def process(self):
+        d, self.y = get_data_particlenet(merged_npz, padding=padding)
+        self.coords = d['points']
+        self.features = d['features']
+        self.masks = d['mask']
+        self.merged_npz = merged_npz
+        self.n_events = len(self.y)
+
+        for i in range(self.n_events):
+            data = Data(
+                x = torch.from_numpy(self.coords[i].astype(np.float32)),
+                features = torch.from_numpy(self.features[i].astype(np.float32)),
+                mask = torch.from_numpy(self.masks[i].astype(np.float32)),
+                y = torch.from_numpy(self.y[i:i+1].astype(np.float32))
+                )
+            torch.save(data, self.processed_dir + '/' + self.unshuffled_processed_files[i])
+
     def get(self, i):
-        return Data(
-            x = torch.from_numpy(self.coords[i].astype(np.float32)),
-            features = torch.from_numpy(self.features[i].astype(np.float32)),
-            mask = torch.from_numpy(self.masks[i].astype(np.float32)),
-            y = torch.from_numpy(self.y[i:i+1].astype(np.float32))
-            )
+        return torch.load(self.processed_dir+'/'+self.processed_files[i])
 
 
 def main():

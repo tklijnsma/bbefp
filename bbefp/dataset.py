@@ -5,69 +5,9 @@ import uptools
 import seutils
 from math import pi
 import awkward as ak
-
-np.random.seed(1001)
-
 import bbefp
 
-class ExtremaRecorder():
-    '''
-    Records the min and max of a set of values
-    Doesn't store the values unless the standard deviation is requested too
-    '''
-    def __init__(self, do_std=True):
-        self.min = 1e6
-        self.max = -1e6
-        self.mean = 0.
-        self.n = 0
-        self.do_std = do_std
-        if self.do_std: self.values = np.array([])
-
-    def update(self, values):
-        self.min = min(self.min, np.min(values))
-        self.max = max(self.max, np.max(values))
-        n_new = self.n + len(values)
-        self.mean = (self.mean * self.n + np.sum(values)) / n_new
-        self.n = n_new
-        if self.do_std: self.values = np.concatenate((self.values, values))
-
-    @property
-    def std(self):
-        if self.do_std:
-            return np.std(self.values)
-        else:
-            return 0.
-
-    def quantile(self, quantile):
-        return np.quantile(self.values, quantile)
-
-    def __repr__(self):
-        return (
-            '{self.min:+7.3f} to {self.max:+7.3f}, mean={self.mean:+7.3f}{std} ({self.n})'
-            .format(
-                self=self,
-                std='+-{:.3f}'.format(self.std()) if self.do_std else ''
-                )
-            )
-
-    def hist(self, outfile):
-        import matplotlib.pyplot as plt
-        figure = plt.figure()
-        ax = figure.gca()
-        ax.hist(self.values, bins=25)
-        plt.savefig(outfile, bbox_inches='tight')
-
-    def normalize(self, values):
-        """
-        Returns normalized values
-        """
-        q10 = self.quantile(self.values, .05)
-        q90 = self.quantile(self.values, .95)
-        left = q10 if abs(self.min/q10) < .7 else self.min
-        right = q90 if abs(q90/self.max) < .7 else self.max
-        width = right-left
-        select_nonzero = values != 0.
-        values[select_nonzero] = left + values[select_nonzero] / width
+np.random.seed(1001)
 
 
 def ntup_to_npz_signal(event, outfile):

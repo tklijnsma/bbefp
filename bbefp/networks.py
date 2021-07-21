@@ -301,6 +301,7 @@ class DynamicReductionNetwork(nn.Module):
         middle_width = 3 * hidden_dim // 2
 
         self.inputnet =  nn.Sequential(
+            nn.BatchNorm1d(input_dim),
             nn.Linear(input_dim, hidden_dim//2),
             nn.ELU(),
             nn.Linear(hidden_dim//2, hidden_dim),

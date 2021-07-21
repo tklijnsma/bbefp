@@ -264,8 +264,8 @@ class DRNDataset(Dataset):
             self.constituents[i].energy
             )).T
         return Data(
-            x = torch.from_numpy(X),
-            y = torch.from_numpy(self.y[i:i+1])
+            x = torch.from_numpy(X).type(torch.FloatTensor),
+            y = torch.from_numpy(self.y[i:i+1]).type(torch.LongTensor)
             )
 
 # __________________________________________________

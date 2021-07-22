@@ -24,6 +24,7 @@ from torch_geometric.utils import normalized_cut
 from torch_geometric.utils import remove_self_loops
 from torch_geometric.utils.undirected import to_undirected
 from torch_geometric.nn import (graclus, max_pool, max_pool_x,
+                                avg_pool, avg_pool_x,
                                 global_mean_pool, global_max_pool,
                                 global_add_pool)
 
@@ -301,12 +302,14 @@ class DynamicReductionNetwork(nn.Module):
         middle_width = 3 * hidden_dim // 2
 
         self.inputnet =  nn.Sequential(
-            nn.BatchNorm1d(input_dim),
             nn.Linear(input_dim, hidden_dim//2),
+            nn.BatchNorm1d(hidden_dim//2),
             nn.ELU(),
             nn.Linear(hidden_dim//2, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ELU()
         )
 
@@ -344,16 +347,19 @@ class DynamicReductionNetwork(nn.Module):
         weight = normalized_cut_2d(data.edge_index, data.x)
         cluster = graclus(data.edge_index, weight, data.x.size(0))
         data.edge_attr = None
-        data = max_pool(cluster, data)
+        # data = max_pool(cluster, data)
+        data = avg_pool(cluster, data)
 
         data.edge_index = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv2.flow))
         data.x = self.edgeconv2(data.x, data.edge_index)
 
         weight = normalized_cut_2d(data.edge_index, data.x)
         cluster = graclus(data.edge_index, weight, data.x.size(0))
-        x, batch = max_pool_x(cluster, data.x, data.batch)
+        # x, batch = max_pool_x(cluster, data.x, data.batch)
+        x, batch = avg_pool_x(cluster, data.x, data.batch)
 
-        x = global_max_pool(x, batch)
+        # x = global_max_pool(x, batch)
+        x = global_mean_pool(x, batch)
 
         logits = self.output(x).squeeze(-1)
         return logits

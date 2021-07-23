@@ -282,21 +282,75 @@ def normalized_cut_2d(edge_index, pos):
     edge_attr = torch.norm(pos[row] - pos[col], p=2, dim=1)
     return normalized_cut(edge_index, edge_attr, num_nodes=pos.size(0))
 
+# _________________________________________________________________________
 
 class DynamicReductionNetwork(nn.Module):
-    # This model clusters nearest neighbour graphs
-    # in two steps.
-    # The latent space trained to group useful features at each level
-    # of aggregration.
-    # This allows single quantities to be regressed from complex point counts
-    # in a location and orientation invariant way.
-    # One encoding layer is used to abstract away the input features.
     def __init__(self, input_dim=4, hidden_dim=64, output_dim=2, k=16, aggr='add',
                  norm=torch.tensor([1./1000., 1./10., 1./3.15, 1/3000.])):
         super(DynamicReductionNetwork, self).__init__()
 
         self.datanorm = nn.Parameter(norm)
 
+        self.k = k
+        start_width = 2 * hidden_dim
+        middle_width = 3 * hidden_dim // 2
+
+        self.inputnet =  nn.Sequential(
+            nn.BatchNorm1d(input_dim),
+            nn.Linear(input_dim, hidden_dim//2),
+            nn.ELU(),
+            nn.Linear(hidden_dim//2, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU()
+        )
+
+        convnn1 = nn.Sequential(nn.Linear(start_width, middle_width),
+                                nn.ELU(),
+                                nn.Linear(middle_width, hidden_dim),
+                                nn.ELU(),
+                                )
+        convnn2 = nn.Sequential(nn.Linear(start_width, middle_width),
+                                nn.ELU(),
+                                nn.Linear(middle_width, hidden_dim),
+                                nn.ELU(),
+                                )
+        self.edgeconv1 = EdgeConv(nn=convnn1, aggr=aggr)
+        self.edgeconv2 = EdgeConv(nn=convnn2, aggr=aggr)
+        
+        self.output = nn.Sequential(nn.Linear(hidden_dim, hidden_dim),
+                                    nn.ELU(),
+                                    nn.Linear(hidden_dim, hidden_dim//2),
+                                    nn.ELU(),
+                                    nn.Linear(hidden_dim//2, output_dim))
+
+    def forward(self, data):
+        data.x = self.inputnet(data.x)
+        data.edge_index = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv1.flow))
+        data.x = self.edgeconv1(data.x, data.edge_index)
+
+        weight = normalized_cut_2d(data.edge_index, data.x)
+        cluster = graclus(data.edge_index, weight, data.x.size(0))
+        data.edge_attr = None
+        data = max_pool(cluster, data)
+
+        data.edge_index = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv2.flow))
+        data.x = self.edgeconv2(data.x, data.edge_index)
+
+        weight = normalized_cut_2d(data.edge_index, data.x)
+        cluster = graclus(data.edge_index, weight, data.x.size(0))
+        x, batch = max_pool_x(cluster, data.x, data.batch)
+
+        x = global_max_pool(x, batch)
+
+        logits = self.output(x).squeeze(-1)
+        return logits
+
+
+class DynamicReductionNetworkMoreBatchNorms(nn.Module):
+    def __init__(self, input_dim=4, hidden_dim=64, output_dim=2, k=16, aggr='add', norm=torch.tensor([1., 1., 1., 1.])):
+        super(DynamicReductionNetworkMoreBatchNorms, self).__init__()
+        self.datanorm = nn.Parameter(norm)
         self.k = k
         start_width = 2 * hidden_dim
         middle_width = 3 * hidden_dim // 2
@@ -333,13 +387,6 @@ class DynamicReductionNetwork(nn.Module):
                                     nn.Linear(hidden_dim//2, output_dim))
 
     def forward(self, data):
-        # data.x = self.datanorm * data.x # Normalization taken care of in preproc
-        # eta_phi = data.x[:,1:3]        
-        # data.x = data.x[:,1:] # Strip off pt
-
-        # print(data.x)
-        # raise Exception
-
         data.x = self.inputnet(data.x)
         data.edge_index = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv1.flow))
         data.x = self.edgeconv1(data.x, data.edge_index)
@@ -347,7 +394,6 @@ class DynamicReductionNetwork(nn.Module):
         weight = normalized_cut_2d(data.edge_index, data.x)
         cluster = graclus(data.edge_index, weight, data.x.size(0))
         data.edge_attr = None
-        # data = max_pool(cluster, data)
         data = avg_pool(cluster, data)
 
         data.edge_index = to_undirected(knn_graph(data.x, self.k, data.batch, loop=False, flow=self.edgeconv2.flow))
@@ -355,17 +401,11 @@ class DynamicReductionNetwork(nn.Module):
 
         weight = normalized_cut_2d(data.edge_index, data.x)
         cluster = graclus(data.edge_index, weight, data.x.size(0))
-        # x, batch = max_pool_x(cluster, data.x, data.batch)
         x, batch = avg_pool_x(cluster, data.x, data.batch)
 
-        # x = global_max_pool(x, batch)
         x = global_mean_pool(x, batch)
-
         logits = self.output(x).squeeze(-1)
         return logits
-
-        # print(logits)
-        # return F.log_softmax(logits, dim=1)
 
 
 class ParticleNet(nn.Module):
